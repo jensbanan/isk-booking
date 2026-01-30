@@ -1,17 +1,16 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@supabase/supabase-js";
 
+// Supabase-klienten bruger 2 "nøgler" fra Netlify/StackBlitz miljøvariabler.
+// De skal være sat som VITE_SUPABASE_URL og VITE_SUPABASE_ANON_KEY.
 const supabase = createClient(
   import.meta.env.VITE_SUPABASE_URL,
   import.meta.env.VITE_SUPABASE_ANON_KEY
 );
 
-// ISK mødelokale booking
-// - 2-trins flow: vælg lokale -> ugekalender
-// - 60 min slots (08:00-17:00), Man-Fre
-// - Book ved klik (modal med navn)
-// - Slet ved klik på booket slot (bekræftelse)
-// - Delt/persisteret storage via Supabase (PostgreSQL)
+// ------------------------
+// KONFIG
+// ------------------------
 
 const ROOMS = [
   "Lokale 301 (22 personer)",
@@ -19,22 +18,13 @@ const ROOMS = [
   "Lokale 315 (6 personer)",
 ];
 
-// Danish day abbreviations (Mon-Fri)
-const DK_DAY = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"]; // includes weekend for safety
-const DK_MONTH = [
-  "jan",
-  "feb",
-  "mar",
-  "apr",
-  "maj",
-  "jun",
-  "jul",
-  "aug",
-  "sep",
-  "okt",
-  "nov",
-  "dec",
-];
+// Dansk: ugedage og måneder
+const DK_DAY = ["Man", "Tir", "Ons", "Tor", "Fre", "Lør", "Søn"];
+const DK_MONTH = ["jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec"];
+
+// ------------------------
+// SMÅ HJÆLPEFUNKTIONER
+// ------------------------
 
 function pad2(n) {
   return String(n).padStart(2, "0");
@@ -47,12 +37,12 @@ function minutesToHHMM(mins) {
 }
 
 function formatSlotLabel(startMins) {
-  const endMins = startMins + 60;
+  const endMins = startMins + 60; // 60 min slot
   return `${minutesToHHMM(startMins)}-${minutesToHHMM(endMins)}`;
 }
 
 function toISODate(dateLike) {
-  // YYYY-MM-DD in local time
+  // YYYY-MM-DD (lokal tid)
   const d = new Date(dateLike);
   const year = d.getFullYear();
   const month = pad2(d.getMonth() + 1);
@@ -77,9 +67,8 @@ function startOfWeekMonday(dateLike) {
 
 function formatDanishDayLabel(dateLike) {
   const d = new Date(dateLike);
-  const jsDay = d.getDay();
-  // Convert JS day (Sun=0) to DK_DAY index where Mon=0..Sun=6
-  const dkIndex = jsDay === 0 ? 6 : jsDay - 1;
+  const jsDay = d.getDay(); // Sun=0
+  const dkIndex = jsDay === 0 ? 6 : jsDay - 1; // Mon=0..Sun=6
   const dayName = DK_DAY[dkIndex];
   const day = d.getDate();
   const month = DK_MONTH[d.getMonth()];
@@ -93,44 +82,43 @@ function formatWeekRange(mondayLike) {
   const sMonth = DK_MONTH[start.getMonth()];
   const eDay = end.getDate();
   const eMonth = DK_MONTH[end.getMonth()];
-  if (start.getMonth() === end.getMonth()) {
-    return `${sDay}.–${eDay}. ${sMonth}`;
-  }
+  if (start.getMonth() === end.getMonth()) return `${sDay}.–${eDay}. ${sMonth}`;
   return `${sDay}. ${sMonth} – ${eDay}. ${eMonth}`;
 }
 
 function buildSlots() {
+  // 08:00 til 17:00 i 60-min blokke => 9 slots: 08-09 ... 16-17
   const slots = [];
   for (let m = 8 * 60; m < 17 * 60; m += 60) {
     slots.push({ startMins: m, label: formatSlotLabel(m) });
   }
-  return slots; // 9 slots
+  return slots;
 }
 
-function normalizeBookings(raw) {
-  if (!Array.isArray(raw)) return [];
-  return raw
-    .filter(
-      (b) =>
-        b &&
-        typeof b.room === "string" &&
-        typeof b.date === "string" &&
-        typeof b.startMins === "number" &&
-        typeof b.name === "string"
-    )
-    .map((b) => ({
-      room: b.room,
-      date: b.date,
-      startMins: b.startMins,
-      name: b.name.trim(),
-    }));
-}
-
+// Vi bruger en “nøgle” i app’en til hurtig opslagsværdi.
+// Den er kun til app’en (ikke databasen).
 function bookingKey(room, date, startMins) {
   return `${room}__${date}__${startMins}`;
 }
 
-function App() {
+function normalizeBookings(data) {
+  // Supabase returnerer typisk start_mins, men i app’en bruger vi startMins
+  if (!Array.isArray(data)) return [];
+  return data
+    .filter((b) => b && b.room && b.date && typeof b.start_mins === "number" && b.name)
+    .map((b) => ({
+      room: b.room,
+      date: typeof b.date === "string" ? b.date : String(b.date),
+      startMins: b.start_mins,
+      name: String(b.name).trim(),
+    }));
+}
+
+// ------------------------
+// APP
+// ------------------------
+
+export default function App() {
   const slots = useMemo(() => buildSlots(), []);
 
   const [selectedRoom, setSelectedRoom] = useState(null);
@@ -146,9 +134,10 @@ function App() {
   const [nameInput, setNameInput] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
 
-  // Snapshot til rollback ved delete (mere robust end “const snapshot = bookings”)
+  // Til rollback ved fejl (hvis slet fejler)
   const bookingsSnapshotRef = useRef([]);
 
+  // Index så vi kan slå op lynhurtigt: "er denne slot booket?"
   const bookingsIndex = useMemo(() => {
     const map = new Map();
     for (const b of bookings) {
@@ -157,56 +146,42 @@ function App() {
     return map;
   }, [bookings]);
 
+  // Hent bookinger fra Supabase, når man vælger et lokale
   useEffect(() => {
     if (!selectedRoom) return;
 
     let isMounted = true;
-
     setLoading(true);
 
     const fetchBookings = async () => {
       const { data, error } = await supabase
         .from("bookings")
-        .select("*")
+        .select("room,date,start_mins,name")
         .eq("room", selectedRoom);
 
       if (error) {
-        console.error("Supabase fejl:", error);
+        console.error("Supabase fejl (hent):", error);
         if (isMounted) setLoading(false);
         return;
       }
 
-      const normalized = normalizeBookings(
-        (data ?? []).map((b) => ({
-          room: b.room,
-          date: b.date,
-          startMins: b.start_mins,
-          name: b.name,
-        }))
-      );
-
       if (isMounted) {
-        setBookings(normalized);
+        setBookings(normalizeBookings(data ?? []));
         setLoading(false);
       }
     };
 
     fetchBookings();
 
-    // Realtime: undgå filter-strengen (følsom ved mellemrum/parenteser).
-    // Lyt på alle ændringer og filtrér i callback.
+    // Realtime: lyt på ALLE ændringer og filtrér i callback (robust)
     const channel = supabase
       .channel("bookings-all")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "bookings" },
-        (payload) => {
-          const changedRoom = payload?.new?.room ?? payload?.old?.room;
-          if (changedRoom === selectedRoom) {
-            fetchBookings();
-          }
+      .on("postgres_changes", { event: "*", schema: "public", table: "bookings" }, (payload) => {
+        const changedRoom = payload?.new?.room ?? payload?.old?.room;
+        if (changedRoom === selectedRoom) {
+          fetchBookings();
         }
-      )
+      })
       .subscribe();
 
     return () => {
@@ -242,6 +217,9 @@ function App() {
     setErrorMsg("");
   }
 
+  // ------------------------
+  // GEM BOOKING (CREATE)
+  // ------------------------
   async function confirmCreate() {
     if (!activeCell) return;
 
@@ -251,13 +229,13 @@ function App() {
       return;
     }
 
-    const id = bookingKey(activeCell.room, activeCell.date, activeCell.startMins);
-    if (bookingsIndex.has(id)) {
+    const key = bookingKey(activeCell.room, activeCell.date, activeCell.startMins);
+    if (bookingsIndex.has(key)) {
       setErrorMsg("Tidsrummet er allerede booket.");
       return;
     }
 
-    // Optimistisk UI: vis bookingen med det samme
+    // 1) Optimistisk UI: vis bookingen med det samme
     setBookings((prev) => {
       const next = prev.filter(
         (b) =>
@@ -276,20 +254,22 @@ function App() {
       return next;
     });
 
+    // 2) Gem i Supabase (uden id — Supabase har id som tal og laver det selv)
     try {
-      const { error } = await supabase.from("bookings").insert({
-        id,
-        room: activeCell.room,
-        date: activeCell.date,
-        start_mins: activeCell.startMins,
-        name,
-      });
+      const { error } = await supabase.from("bookings").insert([
+        {
+          room: activeCell.room,
+          date: activeCell.date, // skal passe til din kolonne-type (date)
+          start_mins: activeCell.startMins,
+          name,
+        },
+      ]);
 
       if (error) throw error;
 
       closeModal();
     } catch (e) {
-      console.error(e);
+      console.error("Supabase fejl (gem):", e);
 
       // Rollback hvis DB-fejl
       setBookings((prev) =>
@@ -303,14 +283,15 @@ function App() {
         )
       );
 
-      setErrorMsg("Kunne ikke gemme booking. Prøv igen.");
+      setErrorMsg(`Kunne ikke gemme booking: ${e?.message ?? "ukendt fejl"}`);
     }
   }
 
+  // ------------------------
+  // SLET BOOKING (DELETE)
+  // ------------------------
   async function confirmDelete() {
     if (!activeCell) return;
-
-    const id = bookingKey(activeCell.room, activeCell.date, activeCell.startMins);
 
     // Snapshot til rollback
     bookingsSnapshotRef.current = bookings;
@@ -328,18 +309,24 @@ function App() {
     );
 
     try {
-      const { error } = await supabase.from("bookings").delete().eq("id", id);
+      // Vi sletter ved at matche de 3 felter (room, date, start_mins)
+      const { error } = await supabase
+        .from("bookings")
+        .delete()
+        .eq("room", activeCell.room)
+        .eq("date", activeCell.date)
+        .eq("start_mins", activeCell.startMins);
 
       if (error) throw error;
 
       closeModal();
     } catch (e) {
-      console.error(e);
+      console.error("Supabase fejl (slet):", e);
 
       // Rollback
       setBookings(bookingsSnapshotRef.current);
 
-      setErrorMsg("Kunne ikke slette booking. Prøv igen.");
+      setErrorMsg(`Kunne ikke slette booking: ${e?.message ?? "ukendt fejl"}`);
     }
   }
 
@@ -348,6 +335,7 @@ function App() {
     const date = toISODate(dateObj);
     const key = bookingKey(selectedRoom, date, startMins);
     const existing = bookingsIndex.get(key);
+
     if (existing) {
       openDeleteModal(selectedRoom, date, startMins);
     } else {
@@ -370,15 +358,11 @@ function App() {
       <header className="sticky top-0 z-20 border-b border-slate-200/50 bg-white/80 backdrop-blur-md shadow-sm">
         <div className="mx-auto flex max-w-7xl items-center justify-between gap-3 px-6 py-5">
           <div className="min-w-0">
-            <h1 className="text-2xl font-bold tracking-tight sm:text-2xl">
-              ISK mødelokale booking
-            </h1>
+            <h1 className="text-2xl font-bold tracking-tight sm:text-2xl">ISK mødelokale booking</h1>
             {headerSubtitle ? (
               <p className="mt-1 truncate text-sm text-slate-500">{headerSubtitle}</p>
             ) : (
-              <p className="mt-1 text-sm text-slate-500">
-                Vælg et lokale for at se kalenderen.
-              </p>
+              <p className="mt-1 text-sm text-slate-500">Vælg et lokale for at se kalenderen.</p>
             )}
           </div>
 
@@ -420,9 +404,7 @@ function App() {
                     <span className="mx-2 text-slate-400">•</span>
                     {formatDanishDayLabel(activeCell.date)}
                     <span className="mx-2 text-slate-400">•</span>
-                    <span className="font-bold text-slate-900">
-                      {formatSlotLabel(activeCell.startMins)}
-                    </span>
+                    <span className="font-bold text-slate-900">{formatSlotLabel(activeCell.startMins)}</span>
                   </>
                 ) : null}
               </p>
@@ -468,9 +450,7 @@ function App() {
                     <span className="mx-2 text-slate-400">•</span>
                     {formatDanishDayLabel(activeCell.date)}
                     <span className="mx-2 text-slate-400">•</span>
-                    <span className="font-bold text-slate-900">
-                      {formatSlotLabel(activeCell.startMins)}
-                    </span>
+                    <span className="font-bold text-slate-900">{formatSlotLabel(activeCell.startMins)}</span>
                   </>
                 ) : null}
               </p>
@@ -515,6 +495,11 @@ function App() {
   );
 }
 
+// ------------------------
+// UNDERVISNING: Hvad er RoomSelection / CalendarView?
+// Det er bare "små komponenter" (= små byggeklodser) så koden er mere overskuelig.
+// ------------------------
+
 function RoomSelection({ onSelect }) {
   return (
     <div className="mx-auto max-w-5xl">
@@ -532,16 +517,13 @@ function RoomSelection({ onSelect }) {
           >
             <div
               className="absolute inset-0 opacity-0 transition-opacity duration-300 group-hover:opacity-100"
-              style={{
-                background: "radial-gradient(circle at 30% 20%, rgba(255,255,255,0.15), transparent 50%)",
-              }}
+              style={{ background: "radial-gradient(circle at 30% 20%, rgba(255,255,255,0.15), transparent 50%)" }}
             />
             <div className="relative">
               <div className="text-sm font-medium text-blue-100">Mødelokale</div>
               <div className="mt-2 text-xl font-bold text-white">{room}</div>
               <div className="mt-5 inline-flex items-center gap-2 rounded-lg bg-white/15 px-4 py-2 text-sm font-medium text-white backdrop-blur-sm ring-1 ring-white/20 transition group-hover:bg-white/20">
-                Åbn kalender
-                <span className="transition duration-300 group-hover:translate-x-1">→</span>
+                Åbn kalender <span className="transition duration-300 group-hover:translate-x-1">→</span>
               </div>
             </div>
           </button>
@@ -575,16 +557,7 @@ function RoomSelection({ onSelect }) {
   );
 }
 
-function CalendarView({
-  loading,
-  room,
-  weekStart,
-  setWeekStart,
-  weekDays,
-  slots,
-  bookingsIndex,
-  onClickSlot,
-}) {
+function CalendarView({ loading, room, weekStart, setWeekStart, weekDays, slots, bookingsIndex, onClickSlot }) {
   return (
     <div>
       <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -617,7 +590,7 @@ function CalendarView({
       </div>
 
       <div className="overflow-hidden rounded-2xl border border-slate-200/60 bg-white shadow-lg">
-        {/* Desktop/Tablet grid */}
+        {/* Desktop/tablet */}
         <div className="hidden md:block">
           <div className="grid grid-cols-6 border-b bg-gradient-to-r from-slate-50 to-slate-100">
             <div className="px-4 py-4 text-xs font-semibold uppercase tracking-widest text-slate-500">Tid</div>
@@ -630,10 +603,7 @@ function CalendarView({
 
           <div className="max-h-[70vh] overflow-auto">
             {slots.map((s) => (
-              <div
-                key={s.startMins}
-                className="grid grid-cols-6 border-b border-slate-100 hover:bg-slate-50/50 transition-colors last:border-b-0"
-              >
+              <div key={s.startMins} className="grid grid-cols-6 border-b border-slate-100 hover:bg-slate-50/50 transition-colors last:border-b-0">
                 <div className="flex items-center justify-start px-4 py-3 text-sm font-semibold text-slate-700 bg-slate-50/30">
                   {s.label}
                 </div>
@@ -656,7 +626,7 @@ function CalendarView({
           </div>
         </div>
 
-        {/* Mobile layout: day cards */}
+        {/* Mobil */}
         <div className="md:hidden">
           <div className="px-4 py-3 text-sm text-slate-500">
             <span className="font-medium text-slate-700">Tip:</span> Rul ned for dage og tider.
@@ -775,5 +745,3 @@ function Modal({ open, onClose, children }) {
     </div>
   );
 }
-
-export default App;
